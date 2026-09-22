@@ -15,7 +15,19 @@ import lombok.NoArgsConstructor;
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
-@Table(name = "favorites")
+@Table(
+    name = "favorites",
+    uniqueConstraints = {
+        @UniqueConstraint(
+            name = "uk_favorites_user_job_posting",
+            columnNames = {"user_id", "job_posting_id"}
+        ),
+        @UniqueConstraint(
+            name = "uk_favorites_user_education",
+            columnNames = {"user_id", "education_id"}
+        )
+    }
+)
 public class Favorite extends BaseTimeEntity {
 
   @Id
