@@ -11,10 +11,13 @@ import com.skthon.sixthsensebe.global.exception.CustomException;
 import com.skthon.sixthsensebe.global.s3.PathName;
 import com.skthon.sixthsensebe.global.s3.service.S3Service;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
@@ -23,6 +26,7 @@ import java.util.Objects;
 
 @RequiredArgsConstructor
 @Service
+@Slf4j
 public class UserService {
 
   private final UserRepository userRepository;
@@ -128,14 +132,7 @@ public class UserService {
 
 
     if (file != null && !file.isEmpty()) {
-      // 기존 프로필 사진 삭제
-      if (user.getS3url() != null && !user.getS3url().isEmpty()) {
-        deleteProfileImage(user.getS3url());
-      }
-
-      // 새 이미지 업로드
-      String s3Url = s3Service.uploadFile(PathName.PROFILE, file);
-      user.setS3url(s3Url);
+      replaceProfileImage(user, file);
     }
 
     user.setName(name);
@@ -194,14 +191,7 @@ public class UserService {
     User user = userRepository.findById(userId)
         .orElseThrow(() -> new CustomException(UserErrorCode.USER_NOT_FOUND));
 
-    // 기존 프로필 사진 삭제
-    if (user.getS3url() != null && !user.getS3url().isEmpty()) {
-      deleteProfileImage(user.getS3url());
-    }
-
-    // 새 이미지 업로드
-    String s3Url = s3Service.uploadFile(PathName.PROFILE, file);
-    user.setS3url(s3Url);
+    replaceProfileImage(user, file);
 
     userRepository.save(user);
 
@@ -222,7 +212,8 @@ public class UserService {
         .orElseThrow(() -> new CustomException(UserErrorCode.USER_NOT_FOUND));
 
     if (user.getS3url() != null && !user.getS3url().isEmpty()) {
-      deleteProfileImage(user.getS3url());
+      String oldS3Url = user.getS3url();
+      deleteAfterCommit(oldS3Url);
       user.setS3url(null);
       userRepository.save(user);
     }
@@ -237,16 +228,54 @@ public class UserService {
     return userMapper.toResponse(user, isFirstTime);
   }
 
+  private void replaceProfileImage(User user, MultipartFile file) {
+    String oldS3Url = user.getS3url();
+    String newS3Url = s3Service.uploadFile(PathName.PROFILE, file);
+
+    try {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          deleteProfileImage(oldS3Url);
+        }
+
+        @Override
+        public void afterCompletion(int status) {
+          if (status == STATUS_ROLLED_BACK) {
+            deleteProfileImage(newS3Url);
+          }
+        }
+      });
+    } catch (RuntimeException e) {
+      deleteProfileImage(newS3Url);
+      throw e;
+    }
+
+    user.setS3url(newS3Url);
+  }
+
+  private void deleteAfterCommit(String s3Url) {
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        deleteProfileImage(s3Url);
+      }
+    });
+  }
+
   // S3에서 파일 삭제
   private void deleteProfileImage(String s3Url) {
+    if (s3Url == null || s3Url.isBlank()) {
+      return;
+    }
+
     try {
       // S3 URL에서 key 추출
       String key = s3Url.substring(s3Url.lastIndexOf("/") + 1);
       String fullKey = "profile/" + key;
       s3Service.deleteFile(fullKey);
     } catch (Exception e) {
-      // 삭제 실패해도 진행 (파일이 이미 없을 수 있음)
-      System.err.println("프로필 이미지 삭제 실패: " + e.getMessage());
+      log.warn("프로필 이미지 삭제 실패: {}", s3Url, e);
     }
   }
 
